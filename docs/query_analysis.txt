@@ -1,0 +1,71 @@
+QUESTION 1: Monthly Encounters by Specialty
+SQL Query:
+SELECT
+  date_trunc('month', e.encounter_date)::date AS month_start,
+  s.specialty_name,
+  e.encounter_type,
+  COUNT(*) AS total_encounters,
+  COUNT(DISTINCT e.patient_id) AS unique_patients
+FROM encounters e
+JOIN providers p ON e.provider_id = p.provider_id
+JOIN specialties s ON p.specialty_id = s.specialty_id
+GROUP BY
+  date_trunc('month', e.encounter_date)::date,
+  s.specialty_name,
+  e.encounter_type
+ORDER BY
+  month_start,
+  s.specialty_name,
+  e.encounter_type;
+
+Schema Analysis:
+Tables joined: encounters -> providers -> specialties
+Number of joins: 2
+
+Performance:
+Execution time: 24.653 ms
+Estimated rows scanned:
+- encounters: 10,000 rows (Seq Scan)
+- specialties: 10,000 rows (Seq Scan)
+- providers: accessed via Index Scan on providers_pkey (Memoize, 9,999 hits)
+
+Bottleneck Identified:
+- The query must join normalized tables (encounters -> providers -> specialties) before it can aggregate.
+- GROUP BY requires sorting/aggregation across multiple columns; COUNT(DISTINCT patient_id) increases work because the engine must track uniqueness per group.
+- Even at 10k rows the plan performs Sort + GroupAggregate; at larger scale this becomes expensive due to bigger sorts and aggregation state.
+
+
+QUESTION 4: Revenue by Specialty & Month
+SQL Query:
+SELECT
+  date_trunc('month', b.claim_date)::date AS month_start,
+  s.specialty_name,
+  SUM(b.allowed_amount) AS total_allowed_amount,
+  COUNT(*) AS total_claims
+FROM billing b
+JOIN encounters e ON b.encounter_id = e.encounter_id
+JOIN providers p ON e.provider_id = p.provider_id
+JOIN specialties s ON p.specialty_id = s.specialty_id
+GROUP BY
+  date_trunc('month', b.claim_date)::date,
+  s.specialty_name
+ORDER BY
+  month_start,
+  total_allowed_amount DESC;
+
+Schema Analysis:
+Tables joined: billing -> encounters -> providers -> specialties
+Number of joins: 3
+
+Performance:
+Execution time: 32.500 ms
+Estimated rows scanned:
+- billing: 10,000 rows (Seq Scan)
+- encounters: 10,000 rows (Seq Scan)
+- specialties: 10,000 rows (Seq Scan)
+- providers: accessed via Index Scan on providers_pkey (Memoize, 9,999 hits)
+
+Bottleneck Identified:
+- The query must traverse a long join chain (billing -> encounters -> providers -> specialties) just to attach “specialty” to each billing row.
+- Aggregation (SUM) happens after joins, meaning the database processes a large joined dataset before it can reduce it with GROUP BY.
+- The plan shows multiple joins + HashAggregate + Sort. This pattern scales poorly as billing and encounters grow.

@@ -1,0 +1,44 @@
+                                                                        QUERY PLAN                                                                        
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=2145.58..2170.58 rows=10000 width=58) (actual time=32.131..32.134 rows=2 loops=1)
+   Sort Key: ((date_trunc('month'::text, (b.claim_date)::timestamp with time zone))::date), (sum(b.allowed_amount)) DESC
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=262
+   ->  HashAggregate  (cost=1281.19..1481.19 rows=10000 width=58) (actual time=31.747..31.800 rows=2 loops=1)
+         Group Key: (date_trunc('month'::text, (b.claim_date)::timestamp with time zone))::date, s.specialty_name
+         Batches: 1  Memory Usage: 409kB
+         Buffers: shared hit=256
+         ->  Hash Join  (cost=618.30..1181.19 rows=10000 width=25) (actual time=10.708..27.936 rows=10000 loops=1)
+               Hash Cond: (p.specialty_id = s.specialty_id)
+               Buffers: shared hit=256
+               ->  Nested Loop  (cost=319.30..780.93 rows=10000 width=15) (actual time=5.175..15.509 rows=10000 loops=1)
+                     Buffers: shared hit=182
+                     ->  Hash Join  (cost=319.00..530.26 rows=10000 width=15) (actual time=5.119..10.278 rows=10000 loops=1)
+                           Hash Cond: (b.encounter_id = e.encounter_id)
+                           Buffers: shared hit=179
+                           ->  Seq Scan on billing b  (cost=0.00..185.00 rows=10000 width=15) (actual time=0.017..1.139 rows=10000 loops=1)
+                                 Buffers: shared hit=85
+                           ->  Hash  (cost=194.00..194.00 rows=10000 width=8) (actual time=5.049..5.049 rows=10000 loops=1)
+                                 Buckets: 16384  Batches: 1  Memory Usage: 519kB
+                                 Buffers: shared hit=94
+                                 ->  Seq Scan on encounters e  (cost=0.00..194.00 rows=10000 width=8) (actual time=0.020..2.626 rows=10000 loops=1)
+                                       Buffers: shared hit=94
+                     ->  Memoize  (cost=0.30..0.35 rows=1 width=8) (actual time=0.000..0.000 rows=1 loops=10000)
+                           Cache Key: e.provider_id
+                           Cache Mode: logical
+                           Hits: 9999  Misses: 1  Evictions: 0  Overflows: 0  Memory Usage: 1kB
+                           Buffers: shared hit=3
+                           ->  Index Scan using providers_pkey on providers p  (cost=0.29..0.34 rows=1 width=8) (actual time=0.041..0.041 rows=1 loops=1)
+                                 Index Cond: (provider_id = e.provider_id)
+                                 Buffers: shared hit=3
+               ->  Hash  (cost=174.00..174.00 rows=10000 width=18) (actual time=5.454..5.454 rows=10000 loops=1)
+                     Buckets: 16384  Batches: 1  Memory Usage: 636kB
+                     Buffers: shared hit=74
+                     ->  Seq Scan on specialties s  (cost=0.00..174.00 rows=10000 width=18) (actual time=0.023..2.654 rows=10000 loops=1)
+                           Buffers: shared hit=74
+ Planning:
+   Buffers: shared hit=358
+ Planning Time: 4.855 ms
+ Execution Time: 32.500 ms
+(40 rows)
+
