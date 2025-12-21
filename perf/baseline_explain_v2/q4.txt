@@ -1,0 +1,71 @@
+                                                                     QUERY PLAN                                                                     
+----------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=2299.17..2324.17 rows=10000 width=58) (actual time=42.833..43.172 rows=10000 loops=1)
+   Sort Key: ((date_trunc('month'::text, (b.claim_date)::timestamp with time zone))::date), (sum(b.allowed_amount)) DESC
+   Sort Method: quicksort  Memory: 1166kB
+   Buffers: shared hit=412, temp read=14 written=38
+   ->  HashAggregate  (cost=1434.78..1634.78 rows=10000 width=58) (actual time=29.203..33.593 rows=10000 loops=1)
+         Group Key: (date_trunc('month'::text, (b.claim_date)::timestamp with time zone))::date, s.specialty_name
+         Batches: 5  Memory Usage: 4273kB  Disk Usage: 224kB
+         Buffers: shared hit=406, temp read=14 written=38
+         ->  Hash Join  (cost=997.00..1334.78 rows=10000 width=25) (actual time=12.228..21.741 rows=10000 loops=1)
+               Hash Cond: (p.specialty_id = s.specialty_id)
+               Buffers: shared hit=406
+               ->  Hash Join  (cost=698.00..934.52 rows=10000 width=15) (actual time=8.907..14.188 rows=10000 loops=1)
+                     Hash Cond: (e.provider_id = p.provider_id)
+                     Buffers: shared hit=332
+                     ->  Hash Join  (cost=399.00..609.26 rows=10000 width=15) (actual time=5.006..8.264 rows=10000 loops=1)
+                           Hash Cond: (b.encounter_id = e.encounter_id)
+                           Buffers: shared hit=258
+                           ->  Seq Scan on billing b  (cost=0.00..184.00 rows=10000 width=15) (actual time=0.009..0.641 rows=10000 loops=1)
+                                 Buffers: shared hit=84
+                           ->  Hash  (cost=274.00..274.00 rows=10000 width=8) (actual time=4.954..4.955 rows=10000 loops=1)
+                                 Buckets: 16384  Batches: 1  Memory Usage: 519kB
+                                 Buffers: shared hit=174
+                                 ->  Seq Scan on encounters e  (cost=0.00..274.00 rows=10000 width=8) (actual time=0.343..3.233 rows=10000 loops=1)
+                                       Buffers: shared hit=174
+                     ->  Hash  (cost=174.00..174.00 rows=10000 width=8) (actual time=3.863..3.864 rows=10000 loops=1)
+                           Buckets: 16384  Batches: 1  Memory Usage: 519kB
+                           Buffers: shared hit=74
+                           ->  Seq Scan on providers p  (cost=0.00..174.00 rows=10000 width=8) (actual time=0.014..1.855 rows=10000 loops=1)
+                                 Buffers: shared hit=74
+               ->  Hash  (cost=174.00..174.00 rows=10000 width=18) (actual time=3.257..3.258 rows=10000 loops=1)
+                     Buckets: 16384  Batches: 1  Memory Usage: 636kB
+                     Buffers: shared hit=74
+                     ->  Seq Scan on specialties s  (cost=0.00..174.00 rows=10000 width=18) (actual time=0.021..1.508 rows=10000 loops=1)
+                           Buffers: shared hit=74
+ Planning:
+   Buffers: shared hit=370 dirtied=1
+ Planning Time: 5.480 ms
+ Execution Time: 44.011 ms
+(38 rows)
+
+
+Schema Analysis:
+Tables joined: billing -> encounters -> providers -> specialties
+Number of joins: 3
+
+Performance (EXPLAIN ANALYZE):
+Execution time: 44.011 ms
+Rows processed / scanned:
+- billing: 10,000 rows (Seq Scan)
+- encounters: 10,000 rows (Seq Scan)
+- providers: 10,000 rows (Seq Scan)
+- specialties: 10,000 rows (Seq Scan)
+Output groups: 10,000 rows (HashAggregate actual rows=10000)
+
+Plan / Operators Observed:
+- Seq Scan on billing
+- Hash Join (billing -> encounters on encounter_id)
+- Hash Join (encounters -> providers on provider_id)
+- Hash Join (providers -> specialties on specialty_id)
+- HashAggregate (GROUP BY month + specialty_name) computing SUM + COUNT
+  - Batches: 5, Disk Usage: 224kB (hash aggregate spilled to temp)
+- Sort for ORDER BY
+- temp read/written buffers observed (temp read=14 written=38)
+
+Bottleneck Identified:
+- The query requires a long join chain across normalized tables (billing -> encounters -> providers -> specialties) before it can aggregate by specialty.
+- Aggregation occurs after joins, so the engine processes the full joined row set before it can reduce it with GROUP BY.
+- The HashAggregate spilled to temporary disk (multiple batches + disk usage), indicating memory pressure; this is a key scalability warning even at 10k rows.
+- Final ORDER BY requires a sort of the aggregated results, adding additional CPU/memory overhead.

@@ -1,0 +1,60 @@
+                                                                 QUERY PLAN                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------
+ GroupAggregate  (cost=1638.91..1938.91 rows=10000 width=43) (actual time=109.246..116.266 rows=10000 loops=1)
+   Group Key: ((date_trunc('month'::text, e.encounter_date))::date), s.specialty_name, e.encounter_type
+   Buffers: shared hit=331
+   ->  Sort  (cost=1638.91..1663.91 rows=10000 width=31) (actual time=109.174..109.502 rows=10000 loops=1)
+         Sort Key: ((date_trunc('month'::text, e.encounter_date))::date), s.specialty_name, e.encounter_type
+         Sort Method: quicksort  Memory: 1166kB
+         Buffers: shared hit=328
+         ->  Hash Join  (cost=598.00..974.52 rows=10000 width=31) (actual time=12.512..22.024 rows=10000 loops=1)
+               Hash Cond: (p.specialty_id = s.specialty_id)
+               Buffers: shared hit=322
+               ->  Hash Join  (cost=299.00..599.26 rows=10000 width=25) (actual time=7.657..12.479 rows=10000 loops=1)
+                     Hash Cond: (e.provider_id = p.provider_id)
+                     Buffers: shared hit=248
+                     ->  Seq Scan on encounters e  (cost=0.00..274.00 rows=10000 width=25) (actual time=0.888..2.226 rows=10000 loops=1)
+                           Buffers: shared hit=174
+                     ->  Hash  (cost=174.00..174.00 rows=10000 width=8) (actual time=6.718..6.719 rows=10000 loops=1)
+                           Buckets: 16384  Batches: 1  Memory Usage: 519kB
+                           Buffers: shared hit=74
+                           ->  Seq Scan on providers p  (cost=0.00..174.00 rows=10000 width=8) (actual time=0.017..4.115 rows=10000 loops=1)
+                                 Buffers: shared hit=74
+               ->  Hash  (cost=174.00..174.00 rows=10000 width=18) (actual time=4.744..4.744 rows=10000 loops=1)
+                     Buckets: 16384  Batches: 1  Memory Usage: 636kB
+                     Buffers: shared hit=74
+                     ->  Seq Scan on specialties s  (cost=0.00..174.00 rows=10000 width=18) (actual time=0.040..2.228 rows=10000 loops=1)
+                           Buffers: shared hit=74
+ Planning:
+   Buffers: shared hit=231
+ Planning Time: 2.138 ms
+ Execution Time: 116.866 ms
+(29 rows)
+
+
+Schema Analysis:
+Tables joined: encounters -> providers -> specialties
+Number of joins: 2
+
+Performance (EXPLAIN ANALYZE):
+Execution time: 116.866 ms
+Rows processed:
+- encounters: 10,000 rows (Seq Scan on encounters)
+- providers: 10,000 rows (Seq Scan on providers)
+- specialties: 10,000 rows (Seq Scan on specialties)
+Output groups: 10,000 rows (GroupAggregate actual rows=10000)
+
+Plan / Operators Observed:
+- Seq Scan on encounters
+- Seq Scan on providers
+- Seq Scan on specialties
+- Hash Join (encounters -> providers)
+- Hash Join (providers -> specialties)
+- Sort (10,000 rows) to support GroupAggregate
+- GroupAggregate (GROUP BY + COUNT + COUNT DISTINCT)
+
+Bottleneck Identified:
+- Normalized join chain requires joining encounters to providers and specialties before aggregation can occur.
+- The plan performs two hash joins and then sorts the joined rows to execute GroupAggregate.
+- COUNT(DISTINCT patient_id) increases aggregation complexity because the engine must track unique patients per group.
+- At larger scale, the sort + group aggregate (and distinct tracking) will grow significantly in memory/CPU cost.

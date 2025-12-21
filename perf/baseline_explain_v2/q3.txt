@@ -1,0 +1,89 @@
+                                                                         QUERY PLAN                                                                          
+-------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=578258.06..578264.31 rows=2500 width=62) (actual time=280.596..280.679 rows=2500 loops=1)
+   Sort Key: (round((((sum(CASE WHEN (SubPlan 2) THEN 1 ELSE 0 END))::numeric / (NULLIF(count(*), 0))::numeric) * '100'::numeric), 2)) DESC, (count(*)) DESC
+   Sort Method: quicksort  Memory: 292kB
+   Buffers: shared hit=108533
+   ->  GroupAggregate  (cost=975.60..578116.96 rows=2500 width=62) (actual time=44.174..279.766 rows=2500 loops=1)
+         Group Key: s.specialty_name
+         Buffers: shared hit=108527
+         ->  Sort  (cost=975.60..981.85 rows=2500 width=26) (actual time=43.124..43.398 rows=2500 loops=1)
+               Sort Key: s.specialty_name
+               Sort Method: quicksort  Memory: 292kB
+               Buffers: shared hit=325
+               ->  Hash Join  (cost=598.00..834.50 rows=2500 width=26) (actual time=13.408..15.547 rows=2500 loops=1)
+                     Hash Cond: (s.specialty_id = p.specialty_id)
+                     Buffers: shared hit=322
+                     ->  Seq Scan on specialties s  (cost=0.00..174.00 rows=10000 width=18) (actual time=0.008..0.752 rows=10000 loops=1)
+                           Buffers: shared hit=74
+                     ->  Hash  (cost=566.75..566.75 rows=2500 width=16) (actual time=13.360..13.361 rows=2500 loops=1)
+                           Buckets: 4096  Batches: 1  Memory Usage: 159kB
+                           Buffers: shared hit=248
+                           ->  Hash Join  (cost=330.25..566.75 rows=2500 width=16) (actual time=7.366..12.909 rows=2500 loops=1)
+                                 Hash Cond: (p.provider_id = e1.provider_id)
+                                 Buffers: shared hit=248
+                                 ->  Seq Scan on providers p  (cost=0.00..174.00 rows=10000 width=8) (actual time=0.004..2.295 rows=10000 loops=1)
+                                       Buffers: shared hit=74
+                                 ->  Hash  (cost=299.00..299.00 rows=2500 width=16) (actual time=7.320..7.320 rows=2500 loops=1)
+                                       Buckets: 4096  Batches: 1  Memory Usage: 159kB
+                                       Buffers: shared hit=174
+                                       ->  Seq Scan on encounters e1  (cost=0.00..299.00 rows=2500 width=16) (actual time=0.503..6.649 rows=2500 loops=1)
+                                             Filter: ((discharge_date IS NOT NULL) AND ((encounter_type)::text = 'Inpatient'::text))
+                                             Rows Removed by Filter: 7500
+                                             Buffers: shared hit=174
+         SubPlan 1
+           ->  Bitmap Heap Scan on encounters e2  (cost=4.79..115.41 rows=1 width=0) (actual time=0.046..0.046 rows=0 loops=2500)
+                 Recheck Cond: ((encounter_date > e1.discharge_date) AND (encounter_date <= (e1.discharge_date + '30 days'::interval)))
+                 Filter: (patient_id = e1.patient_id)
+                 Rows Removed by Filter: 400
+                 Heap Blocks: exact=42823
+                 Buffers: shared hit=54101
+                 ->  Bitmap Index Scan on idx_encounter_date  (cost=0.00..4.79 rows=50 width=0) (actual time=0.015..0.015 rows=400 loops=2500)
+                       Index Cond: ((encounter_date > e1.discharge_date) AND (encounter_date <= (e1.discharge_date + '30 days'::interval)))
+                       Buffers: shared hit=11278
+         SubPlan 2
+           ->  Bitmap Heap Scan on encounters e2_1  (cost=4.79..115.41 rows=1 width=0) (actual time=0.045..0.045 rows=0 loops=2500)
+                 Recheck Cond: ((encounter_date > e1.discharge_date) AND (encounter_date <= (e1.discharge_date + '30 days'::interval)))
+                 Filter: (patient_id = e1.patient_id)
+                 Rows Removed by Filter: 400
+                 Heap Blocks: exact=42823
+                 Buffers: shared hit=54101
+                 ->  Bitmap Index Scan on idx_encounter_date  (cost=0.00..4.79 rows=50 width=0) (actual time=0.014..0.014 rows=400 loops=2500)
+                       Index Cond: ((encounter_date > e1.discharge_date) AND (encounter_date <= (e1.discharge_date + '30 days'::interval)))
+                       Buffers: shared hit=11278
+ Planning:
+   Buffers: shared hit=318
+ Planning Time: 6.066 ms
+ Execution Time: 281.255 ms
+(55 rows)
+
+
+Schema Analysis:
+Tables joined: encounters (e1) + providers + specialties, plus correlated lookup on encounters (e2)
+Number of joins: 2 physical joins (+ self-access of encounters via EXISTS)
+
+Performance (EXPLAIN ANALYZE):
+Execution time: 281.255 ms
+Rows processed / scanned:
+- encounters e1: Seq Scan 10,000 rows, filtered to 2,500 inpatient discharges (rows removed by filter: 7,500)
+- providers: Seq Scan 10,000 rows
+- specialties: Seq Scan 10,000 rows
+- Correlated EXISTS subquery:
+  - runs 2,500 loops (once per inpatient discharge)
+  - uses Bitmap Index Scan on idx_encounter_date returning ~400 candidate rows per loop
+  - then Bitmap Heap Scan rechecks and filters by patient_id
+Buffers: very high shared hit=108,533 (heavy repeated reads)
+
+Plan / Operators Observed:
+- Seq Scan on encounters e1 with filter encounter_type='Inpatient'
+- Hash Join e1 -> providers, then join to specialties
+- GroupAggregate + Sort for final specialty-level aggregation
+- SubPlans (EXISTS checks):
+  - Bitmap Index Scan on idx_encounter_date
+  - Bitmap Heap Scan on encounters e2 with additional patient_id filter
+
+Bottleneck Identified:
+- Readmission detection requires comparing each inpatient discharge to subsequent encounters for the same patient within a 30-day window (self-join/correlated lookup pattern).
+- Even with an index on encounter_date, the EXISTS subquery executes 2,500 times, pulling ~400 candidate rows each time and then filtering by patient_id, which creates a large amount of repeated work.
+- This repeated probing dominates runtime and buffer usage, making the query significantly slower than the simpler aggregation queries (Q1/Q2/Q4).
+- At scale, this pattern becomes increasingly expensive unless composite indexing (patient_id, encounter_date) and/or data model changes reduce repeated scans.

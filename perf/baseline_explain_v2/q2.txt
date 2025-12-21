@@ -1,0 +1,77 @@
+                                                                             QUERY PLAN                                                                              
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=2398.50..2398.55 rows=20 width=30) (actual time=119.615..119.621 rows=20 loops=1)
+   Buffers: shared hit=287
+   ->  Sort  (cost=2398.50..2423.50 rows=10000 width=30) (actual time=119.613..119.617 rows=20 loops=1)
+         Sort Key: (count(DISTINCT ed.encounter_id)) DESC, (count(*)) DESC
+         Sort Method: top-N heapsort  Memory: 26kB
+         Buffers: shared hit=287
+         ->  GroupAggregate  (cost=1907.41..2132.41 rows=10000 width=30) (actual time=111.296..117.441 rows=10000 loops=1)
+               Group Key: d.icd10_code, pr.cpt_code
+               Buffers: shared hit=284
+               ->  Sort  (cost=1907.41..1932.41 rows=10000 width=18) (actual time=111.223..111.587 rows=10000 loops=1)
+                     Sort Key: d.icd10_code, pr.cpt_code
+                     Sort Method: quicksort  Memory: 1166kB
+                     Buffers: shared hit=281
+                     ->  Hash Join  (cost=898.00..1243.02 rows=10000 width=18) (actual time=10.714..23.878 rows=10000 loops=1)
+                           Hash Cond: (ep.procedure_id = pr.procedure_id)
+                           Buffers: shared hit=278
+                           ->  Hash Join  (cost=589.00..907.76 rows=10000 width=15) (actual time=7.442..16.471 rows=10000 loops=1)
+                                 Hash Cond: (ed.encounter_id = ep.encounter_id)
+                                 Buffers: shared hit=194
+                                 ->  Hash Join  (cost=309.00..490.26 rows=10000 width=11) (actual time=3.706..9.072 rows=10000 loops=1)
+                                       Hash Cond: (ed.diagnosis_id = d.diagnosis_id)
+                                       Buffers: shared hit=139
+                                       ->  Seq Scan on encounter_diagnoses ed  (cost=0.00..155.00 rows=10000 width=8) (actual time=0.013..1.201 rows=10000 loops=1)
+                                             Buffers: shared hit=55
+                                       ->  Hash  (cost=184.00..184.00 rows=10000 width=11) (actual time=3.640..3.641 rows=10000 loops=1)
+                                             Buckets: 16384  Batches: 1  Memory Usage: 558kB
+                                             Buffers: shared hit=84
+                                             ->  Seq Scan on diagnoses d  (cost=0.00..184.00 rows=10000 width=11) (actual time=0.010..2.010 rows=10000 loops=1)
+                                                   Buffers: shared hit=84
+                                 ->  Hash  (cost=155.00..155.00 rows=10000 width=8) (actual time=3.677..3.678 rows=10000 loops=1)
+                                       Buckets: 16384  Batches: 1  Memory Usage: 519kB
+                                       Buffers: shared hit=55
+                                       ->  Seq Scan on encounter_procedures ep  (cost=0.00..155.00 rows=10000 width=8) (actual time=0.020..1.853 rows=10000 loops=1)
+                                             Buffers: shared hit=55
+                           ->  Hash  (cost=184.00..184.00 rows=10000 width=11) (actual time=3.231..3.232 rows=10000 loops=1)
+                                 Buckets: 16384  Batches: 1  Memory Usage: 558kB
+                                 Buffers: shared hit=84
+                                 ->  Seq Scan on procedures pr  (cost=0.00..184.00 rows=10000 width=11) (actual time=0.011..1.607 rows=10000 loops=1)
+                                       Buffers: shared hit=84
+ Planning:
+   Buffers: shared hit=214 dirtied=5
+ Planning Time: 3.293 ms
+ Execution Time: 119.959 ms
+(43 rows)
+
+
+Schema Analysis:
+Tables joined: encounter_diagnoses -> diagnoses -> encounter_procedures -> procedures
+Number of joins: 3
+
+Performance (EXPLAIN ANALYZE):
+Execution time: 119.959 ms
+Rows processed / scanned:
+- encounter_diagnoses: 10,000 rows (Seq Scan)
+- diagnoses: 10,000 rows (Seq Scan)
+- encounter_procedures: 10,000 rows (Seq Scan)
+- procedures: 10,000 rows (Seq Scan)
+Intermediate join output: 10,000 rows (actual rows=10000 after joins in this dataset)
+Output groups: 10,000 rows (GroupAggregate actual rows=10000)
+Final output: 20 rows (LIMIT 20)
+
+Plan / Operators Observed:
+- Seq Scan on encounter_diagnoses, diagnoses, encounter_procedures, procedures
+- Hash Join (encounter_diagnoses -> diagnoses)
+- Hash Join (encounter_diagnoses -> encounter_procedures on encounter_id)
+- Hash Join (encounter_procedures -> procedures)
+- Sort (by icd10_code, cpt_code) to enable GroupAggregate
+- GroupAggregate computing COUNT(*) and COUNT(DISTINCT encounter_id)
+- Top-N heapsort for ORDER BY ... LIMIT 20
+
+Bottleneck Identified:
+- Diagnosis and procedure data are stored in separate many-to-many junction tables. To build diagnosis–procedure pairs, the query must join both junction tables through encounter_id.
+- This pattern scales poorly because it can cause row explosion: if an encounter has m diagnoses and n procedures, it can generate m × n pair rows before aggregation.
+- After joining, the database must sort/group the rows by (icd10_code, cpt_code) and compute COUNT(DISTINCT encounter_id), which adds additional aggregation overhead.
+- Even though we LIMIT to 20 results, the engine still has to process all pairs and aggregates first; only the final sort uses top-N optimization.
