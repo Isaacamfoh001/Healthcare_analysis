@@ -1,0 +1,34 @@
+                                                                  QUERY PLAN                                                                  
+----------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=1679.12..1704.12 rows=10000 width=58) (actual time=36.269..36.599 rows=10000 loops=1)
+   Sort Key: ((date_trunc('month'::text, (d.calendar_date)::timestamp with time zone))::date), (sum(f.total_allowed_amount)) DESC
+   Sort Method: quicksort  Memory: 1166kB
+   Buffers: shared hit=251, temp read=16 written=37
+   ->  HashAggregate  (cost=814.73..1014.73 rows=10000 width=58) (actual time=21.459..25.949 rows=10000 loops=1)
+         Group Key: (date_trunc('month'::text, (d.calendar_date)::timestamp with time zone))::date, s.specialty_name
+         Batches: 5  Memory Usage: 4273kB  Disk Usage: 224kB
+         Buffers: shared hit=245, temp read=16 written=37
+         ->  Hash Join  (cost=332.08..714.73 rows=10000 width=29) (actual time=5.224..15.896 rows=10000 loops=1)
+               Hash Cond: (f.specialty_key = s.specialty_key)
+               Buffers: shared hit=245
+               ->  Hash Join  (cost=23.08..304.47 rows=10000 width=23) (actual time=0.422..4.764 rows=10000 loops=1)
+                     Hash Cond: (f.encounter_date_key = d.date_key)
+                     Buffers: shared hit=161
+                     ->  Seq Scan on fact_encounters f  (cost=0.00..255.00 rows=10000 width=23) (actual time=0.007..1.235 rows=10000 loops=1)
+                           Buffers: shared hit=155
+                     ->  Hash  (cost=13.59..13.59 rows=759 width=8) (actual time=0.391..0.392 rows=759 loops=1)
+                           Buckets: 1024  Batches: 1  Memory Usage: 38kB
+                           Buffers: shared hit=6
+                           ->  Seq Scan on dim_date d  (cost=0.00..13.59 rows=759 width=8) (actual time=0.011..0.203 rows=759 loops=1)
+                                 Buffers: shared hit=6
+               ->  Hash  (cost=184.00..184.00 rows=10000 width=22) (actual time=4.710..4.710 rows=10000 loops=1)
+                     Buckets: 16384  Batches: 1  Memory Usage: 675kB
+                     Buffers: shared hit=84
+                     ->  Seq Scan on dim_specialty s  (cost=0.00..184.00 rows=10000 width=22) (actual time=0.009..2.232 rows=10000 loops=1)
+                           Buffers: shared hit=84
+ Planning:
+   Buffers: shared hit=503
+ Planning Time: 3.534 ms
+ Execution Time: 37.517 ms
+(30 rows)
+

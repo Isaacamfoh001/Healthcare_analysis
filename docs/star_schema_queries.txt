@@ -1,0 +1,135 @@
+STAR SCHEMA QUERIES (DW) + PERFORMANCE COMPARISON
+Dataset: Balanced 10k OLTP + DW load (fact_encounters=10k; bridges=10k each)
+Star EXPLAIN evidence: perf/star_explain/q1.txt ... q4.txt
+Baseline (OLTP) evidence: perf/baseline_explain_v2/q1.txt ... q4.txt
+
+------------------------------------------------------------
+QUERY 1: Monthly Encounters by Specialty (by encounter type)
+------------------------------------------------------------
+Star Schema SQL:
+SELECT
+  d.year,
+  d.month,
+  (DATE_TRUNC('month', d.calendar_date))::date AS month_start,
+  s.specialty_name,
+  et.type_name AS encounter_type,
+  COUNT(*) AS total_encounters,
+  COUNT(DISTINCT f.patient_key) AS unique_patients
+FROM dw.fact_encounters f
+JOIN dw.dim_date d ON f.encounter_date_key = d.date_key
+JOIN dw.dim_specialty s ON f.specialty_key = s.specialty_key
+JOIN dw.dim_encounter_type et ON f.encounter_type_key = et.encounter_type_key
+GROUP BY 1,2,3,4,5
+ORDER BY month_start, specialty_name, encounter_type;
+
+Performance:
+- Baseline (OLTP) Execution Time: 116.866 ms
+- Star (DW) Execution Time: 105.907 ms
+- Improvement factor: 116.866 / 105.907 = 1.10x faster
+
+Why faster:
+- Uses fact_encounters keys directly (no providers->specialties join chain).
+Why not dramatically faster here:
+- Still needs a full scan + sort + GroupAggregate and COUNT(DISTINCT), which remains expensive.
+
+------------------------------------------------------------
+QUERY 2: Top Diagnosis–Procedure Pairs
+------------------------------------------------------------
+Star Schema SQL:
+SELECT
+  dg.icd10_code,
+  pr.cpt_code,
+  COUNT(*) AS pair_rows,
+  COUNT(DISTINCT f.encounter_key) AS encounter_count
+FROM dw.fact_encounters f
+JOIN dw.bridge_encounter_diagnoses bed ON f.encounter_key = bed.encounter_key
+JOIN dw.dim_diagnosis dg ON bed.diagnosis_key = dg.diagnosis_key
+JOIN dw.bridge_encounter_procedures bep ON f.encounter_key = bep.encounter_key
+JOIN dw.dim_procedure pr ON bep.procedure_key = pr.procedure_key
+GROUP BY 1,2
+ORDER BY encounter_count DESC, pair_rows DESC
+LIMIT 20;
+
+Performance:
+- Baseline (OLTP) Execution Time: 119.959 ms
+- Star (DW) Execution Time: 110.083 ms
+- Improvement factor: 119.959 / 110.083 = 1.09x faster
+
+Why faster:
+- Bridges keep the fact grain clean and join on surrogate keys with good indexing options.
+Why still heavy:
+- Still requires joining both bridge tables and then sorting + grouping.
+- With current generator (~1 diagnosis + 1 procedure per encounter), the row-explosion effect is limited, so gains are modest.
+
+------------------------------------------------------------
+QUERY 3: 30-Day Readmission Rate (by specialty)
+------------------------------------------------------------
+Star Schema SQL:
+WITH inpatient_discharges AS (
+  SELECT
+    f.encounter_key,
+    f.patient_key,
+    f.specialty_key,
+    dd.calendar_date AS discharge_date
+  FROM dw.fact_encounters f
+  JOIN dw.dim_date dd ON f.discharge_date_key = dd.date_key
+  WHERE f.is_inpatient_flag = TRUE
+    AND f.discharge_date_key IS NOT NULL
+),
+flagged AS (
+  SELECT
+    i.specialty_key,
+    CASE WHEN EXISTS (
+      SELECT 1
+      FROM dw.fact_encounters f2
+      JOIN dw.dim_date d2 ON f2.encounter_date_key = d2.date_key
+      WHERE f2.patient_key = i.patient_key
+        AND d2.calendar_date > i.discharge_date
+        AND d2.calendar_date <= i.discharge_date + INTERVAL '30 days'
+    ) THEN 1 ELSE 0 END AS is_readmitted_30d
+  FROM inpatient_discharges i
+)
+SELECT
+  s.specialty_name,
+  COUNT(*) AS inpatient_discharges,
+  SUM(is_readmitted_30d) AS readmissions_30d,
+  ROUND((SUM(is_readmitted_30d)::numeric / NULLIF(COUNT(*), 0)) * 100, 2) AS readmission_rate_pct
+FROM flagged f
+JOIN dw.dim_specialty s ON f.specialty_key = s.specialty_key
+GROUP BY 1
+ORDER BY readmission_rate_pct DESC, inpatient_discharges DESC;
+
+Performance:
+- Baseline (OLTP) Execution Time: 281.255 ms
+- Star (DW) Execution Time: 68.777 ms
+- Improvement factor: 281.255 / 68.777 = 4.09x faster
+
+Why it’s much faster:
+- Readmission logic stays inside the fact table using patient_key + encounter_date_key.
+- The plan uses indexes in DW (notably the partial inpatient index and patient/date lookup index), reducing repeated scanning work.
+- Far fewer buffers were touched vs OLTP because the “search for a future encounter” is more index-friendly in DW.
+
+------------------------------------------------------------
+QUERY 4: Revenue by Specialty & Month
+------------------------------------------------------------
+Star Schema SQL:
+SELECT
+  (DATE_TRUNC('month', d.calendar_date))::date AS month_start,
+  s.specialty_name,
+  SUM(f.total_allowed_amount) AS total_allowed_amount,
+  SUM(f.claim_count) AS total_claims
+FROM dw.fact_encounters f
+JOIN dw.dim_date d ON f.encounter_date_key = d.date_key
+JOIN dw.dim_specialty s ON f.specialty_key = s.specialty_key
+GROUP BY 1,2
+ORDER BY month_start, total_allowed_amount DESC;
+
+Performance:
+- Baseline (OLTP) Execution Time: 44.011 ms
+- Star (DW) Execution Time: 37.517 ms
+- Improvement factor: 44.011 / 37.517 = 1.17x faster
+
+Why faster:
+- Uses pre-aggregated fact metrics (total_allowed_amount, claim_count), so it avoids joining billing->encounters->providers->specialties.
+Why not dramatically faster here:
+- Grouping by month + specialty still requires HashAggregate and Sort over many groups (10k specialties), and can spill to temp depending on memory settings.

@@ -1,0 +1,55 @@
+                                                                                    QUERY PLAN                                                                                     
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=2842.77..2842.82 rows=20 width=30) (actual time=109.878..109.887 rows=20 loops=1)
+   Buffers: shared hit=477
+   ->  Sort  (cost=2842.77..2867.77 rows=10000 width=30) (actual time=109.877..109.884 rows=20 loops=1)
+         Sort Key: (count(DISTINCT f.encounter_key)) DESC, (count(*)) DESC
+         Sort Method: top-N heapsort  Memory: 26kB
+         Buffers: shared hit=477
+         ->  GroupAggregate  (cost=2351.67..2576.67 rows=10000 width=30) (actual time=101.506..107.736 rows=10000 loops=1)
+               Group Key: dg.icd10_code, pr.cpt_code
+               Buffers: shared hit=474
+               ->  Sort  (cost=2351.67..2376.67 rows=10000 width=22) (actual time=101.451..101.925 rows=10000 loops=1)
+                     Sort Key: dg.icd10_code, pr.cpt_code
+                     Sort Method: quicksort  Memory: 1166kB
+                     Buffers: shared hit=474
+                     ->  Hash Join  (cost=1307.00..1687.28 rows=10000 width=22) (actual time=12.934..20.659 rows=10000 loops=1)
+                           Hash Cond: (bep.procedure_key = pr.procedure_key)
+                           Buffers: shared hit=471
+                           ->  Hash Join  (cost=988.00..1342.02 rows=10000 width=23) (actual time=8.970..14.957 rows=10000 loops=1)
+                                 Hash Cond: (f.encounter_key = bep.encounter_key)
+                                 Buffers: shared hit=377
+                                 ->  Hash Join  (cost=699.00..915.52 rows=10000 width=23) (actual time=5.611..9.733 rows=10000 loops=1)
+                                       Hash Cond: (bed.diagnosis_key = dg.diagnosis_key)
+                                       Buffers: shared hit=313
+                                       ->  Hash Join  (cost=380.00..570.26 rows=10000 width=24) (actual time=2.529..4.937 rows=10000 loops=1)
+                                             Hash Cond: (bed.encounter_key = f.encounter_key)
+                                             Buffers: shared hit=219
+                                             ->  Seq Scan on bridge_encounter_diagnoses bed  (cost=0.00..164.00 rows=10000 width=16) (actual time=0.005..0.579 rows=10000 loops=1)
+                                                   Buffers: shared hit=64
+                                             ->  Hash  (cost=255.00..255.00 rows=10000 width=8) (actual time=2.501..2.502 rows=10000 loops=1)
+                                                   Buckets: 16384  Batches: 1  Memory Usage: 519kB
+                                                   Buffers: shared hit=155
+                                                   ->  Seq Scan on fact_encounters f  (cost=0.00..255.00 rows=10000 width=8) (actual time=0.005..1.385 rows=10000 loops=1)
+                                                         Buffers: shared hit=155
+                                       ->  Hash  (cost=194.00..194.00 rows=10000 width=15) (actual time=3.049..3.050 rows=10000 loops=1)
+                                             Buckets: 16384  Batches: 1  Memory Usage: 597kB
+                                             Buffers: shared hit=94
+                                             ->  Seq Scan on dim_diagnosis dg  (cost=0.00..194.00 rows=10000 width=15) (actual time=0.011..1.558 rows=10000 loops=1)
+                                                   Buffers: shared hit=94
+                                 ->  Hash  (cost=164.00..164.00 rows=10000 width=16) (actual time=3.326..3.326 rows=10000 loops=1)
+                                       Buckets: 16384  Batches: 1  Memory Usage: 597kB
+                                       Buffers: shared hit=64
+                                       ->  Seq Scan on bridge_encounter_procedures bep  (cost=0.00..164.00 rows=10000 width=16) (actual time=0.005..1.637 rows=10000 loops=1)
+                                             Buffers: shared hit=64
+                           ->  Hash  (cost=194.00..194.00 rows=10000 width=15) (actual time=3.920..3.920 rows=10000 loops=1)
+                                 Buckets: 16384  Batches: 1  Memory Usage: 597kB
+                                 Buffers: shared hit=94
+                                 ->  Seq Scan on dim_procedure pr  (cost=0.00..194.00 rows=10000 width=15) (actual time=0.022..1.992 rows=10000 loops=1)
+                                       Buffers: shared hit=94
+ Planning:
+   Buffers: shared hit=475
+ Planning Time: 7.180 ms
+ Execution Time: 110.083 ms
+(51 rows)
+
