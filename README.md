@@ -1,3 +1,4 @@
+````md
 # Healthcare Analytics Lab (OLTP → Star Schema)
 
 This mini project shows a very common real-world problem:  
@@ -51,7 +52,6 @@ Deliverables (rubric files) at repo root:
 ```bash
 createdb healthcare_oltp
 ```
-
 ````
 
 Quick check:
@@ -160,4 +160,6 @@ Where results are saved:
 - `etl_design.txt` — how the ETL works (dimensions, fact, bridges)
 - `reflection.md` — what improved, what trade-offs we made, and the numbers
 
-````
+```
+
+```
