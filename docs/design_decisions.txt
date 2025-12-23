@@ -1,0 +1,103 @@
+DESIGN DECISIONS - STAR SCHEMA (Healthcare Analytics)
+
+Decision 1: Fact Table Grain
+Choice: Option A — One row per encounter.
+
+Why this grain:
+- Q1 (monthly encounters by specialty/type) naturally aggregates at encounter level.
+- Q4 (revenue by specialty/month) is encounter-driven (billing ties to encounter_id).
+- Q3 (readmissions) requires comparing encounters across time for the same patient; having one row per encounter makes self-joins simpler and avoids duplication.
+- Option B (one row per diagnosis within encounter) and Option C (one row per procedure within encounter) would duplicate encounter-level measures (e.g., allowed_amount) and inflate counts unless carefully handled.
+- Diagnosis and procedure are many-to-many with encounters; the clean dimensional approach is to keep encounter as the core fact and represent diagnoses/procedures via bridge tables.
+
+Decision 2: Dimension Tables
+We will create these dimensions (surrogate primary keys + natural keys from OLTP for traceability):
+
+1) dim_date
+- date_key (int, e.g., YYYYMMDD)
+- calendar_date (date)
+- year, quarter, month, month_name
+- day_of_month, day_of_week, week_of_year
+- is_weekend
+
+Used for: encounter_date and claim_date rollups (Q1, Q4).
+
+2) dim_patient
+- patient_key (surrogate)
+- patient_id (natural key)
+- mrn
+- first_name, last_name
+- gender
+- date_of_birth
+- age (optional derived at load time), age_group (e.g., 0–17, 18–34, 35–49, 50–64, 65+)
+
+Used for: unique patient counts and readmission logic (Q1, Q3).
+
+3) dim_provider
+- provider_key (surrogate)
+- provider_id (natural key)
+- first_name, last_name
+- credential
+- specialty_id (natural) and department_id (natural) as lineage fields (optional)
+Note: provider attributes may change; provider dimension can be SCD Type 1 for simplicity.
+
+Used for: linking encounters to specialty and department.
+
+4) dim_specialty
+- specialty_key (surrogate)
+- specialty_id (natural key)
+- specialty_name
+- specialty_code
+
+Used for: grouping encounters and revenue by specialty (Q1, Q4, Q3).
+
+5) dim_department
+- department_key (surrogate)
+- department_id (natural key)
+- department_name
+- floor
+- capacity
+
+Used for: optional slicing by department.
+
+6) dim_encounter_type
+- encounter_type_key (surrogate)
+- type_name (Outpatient / Inpatient / ER)
+
+Used for: Q1 breakdown by encounter type and for Q3 filter on inpatient.
+
+Optional dimensions (depending on scope/time):
+- dim_claim_status (Paid/Denied/etc.) if revenue analysis needs it.
+- dim_diagnosis and dim_procedure (recommended if we use bridge tables).
+
+Decision 3: Pre-Aggregated Metrics (Stored in the fact table)
+We will store encounter-level metrics in fact_encounters to reduce joins and compute cost:
+
+- diagnosis_count: number of diagnoses linked to the encounter
+- procedure_count: number of procedures linked to the encounter
+- total_claim_amount: SUM(claim_amount) for encounter (or 0 if none)
+- total_allowed_amount: SUM(allowed_amount) for encounter (used heavily in Q4)
+- claim_count: number of billing rows for the encounter
+- length_of_stay_days: derived from discharge_date - encounter_date (useful for inpatient analytics)
+- is_inpatient_flag: boolean/0-1 derived from encounter_type
+
+Why this helps performance:
+- Q4 becomes a simple GROUP BY using fact_encounters.total_allowed_amount rather than joining billing each time.
+- COUNTs of diagnoses/procedures avoid expensive joins to bridge tables for common reporting.
+- Fact remains at encounter grain so aggregation remains correct.
+
+Decision 4: Bridge Tables for Many-to-Many Relationships
+Decision: Yes — use bridge tables for diagnoses and procedures.
+
+Bridge tables:
+- bridge_encounter_diagnoses (encounter_key, diagnosis_key, diagnosis_sequence)
+- bridge_encounter_procedures (encounter_key, procedure_key, procedure_date_key)
+
+Why bridges:
+- Encounters can have multiple diagnoses and multiple procedures; denormalizing them into a single fact row would either:
+  - require array-like columns (not ideal for SQL analytics), or
+  - explode the fact table grain (Options B/C), duplicating measures and complicating Q1/Q4/Q3.
+- Bridges keep fact_encounters clean for encounter-level metrics while still enabling Q2 (diagnosis–procedure pairs) by joining bridges when needed.
+
+Trade-off:
+- Q2 still requires bridge joins, but those joins are against surrogate keys and can be optimized with indexes; Q1/Q4/Q3 become much faster due to fewer joins and pre-aggregated measures.
