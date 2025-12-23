@@ -1,0 +1,170 @@
+ETL DESIGN (DW LOAD) — Healthcare Analytics Star Schema
+
+Context
+The OLTP database is normalized and good for transactions, but analytical queries needed multiple joins, large sorts, and expensive group-bys. The DW layer (“dw” schema) is a star schema built to make the reporting queries cheaper.
+
+This ETL is implemented as a SQL-based load script: sql/30_load_dw.sql.
+For the lab, we use a “reload” approach (truncate and re-insert) so results are repeatable and easy to measure.
+
+
+1) Overall Load Strategy (what the script does)
+The ETL follows this order:
+
+A. Clear DW tables (TRUNCATE + RESTART IDENTITY)
+B. Load dim_date (one-time style dimension, but rebuilt for the lab)
+C. Load the remaining dimensions from OLTP (patients, providers, etc.)
+D. Load the encounter fact table (one row per encounter) with pre-aggregated metrics
+E. Load bridge tables for diagnoses and procedures (many-to-many)
+F. ANALYZE all DW tables to keep query plans accurate
+
+This order matters because:
+- The fact needs dimension surrogate keys, so dimensions must exist first.
+- Bridges rely on the fact’s encounter_key and the diagnosis/procedure dimension keys.
+
+
+2) Clearing / Resetting the DW tables
+Implementation:
+- The script truncates bridge tables, the fact, then all dimensions:
+  TRUNCATE dw.bridge_..., dw.fact_encounters, dw.dim_... RESTART IDENTITY CASCADE;
+
+Why:
+- RESTART IDENTITY resets surrogate keys so the runs are reproducible.
+- CASCADE ensures FK dependencies don’t block truncation.
+- For a “real” pipeline we’d do incremental loads, but for this lab, full reload is simpler and matches the goal of performance comparisons.
+
+
+3) dim_date Load Logic
+Goal:
+- Build a date dimension that covers all dates used by the OLTP data:
+  encounter_date, discharge_date, claim_date, and procedure_date.
+
+Implementation:
+- First compute min_date and max_date using LEAST() and GREATEST() across:
+  - encounters.encounter_date
+  - encounters.discharge_date (where not null)
+  - billing.claim_date
+  - encounter_procedures.procedure_date
+
+- Then generate all calendar dates with generate_series(min_date, max_date, '1 day').
+
+- For each day we compute:
+  date_key       = YYYYMMDD integer
+  year, quarter, month
+  month_name     = short name (Mon)
+  day_of_month
+  day_of_week    = ISO day (Mon=1..Sun=7)
+  week_of_year
+  is_weekend     = true if ISO day is 6 or 7
+
+Notes:
+- This is a standard approach in dimensional modeling: you never want to compute date parts repeatedly inside reporting queries.
+
+
+4) Loading the other dimensions (dim_patient, dim_provider, etc.)
+These are straightforward “select from OLTP” loads.
+
+4.1 dim_encounter_type
+- Insert distinct encounter types from encounters.encounter_type.
+- This keeps encounter types consistent and gives a small, stable dimension.
+
+4.2 dim_specialty
+- Loaded from specialties.
+- Holds specialty_name and specialty_code.
+
+4.3 dim_department
+- Loaded from departments.
+- Holds department_name, floor, capacity.
+
+4.4 dim_provider
+- Loaded from providers.
+- Provider keeps specialty_id and department_id as lineage fields (useful for traceability).
+
+4.5 dim_patient
+- Loaded from patients.
+- Includes demographics plus a derived age_group.
+- age_group is computed using age(current_date, date_of_birth) and bucketed:
+  0–17, 18–34, 35–49, 50–64, 65+, Unknown.
+
+4.6 dim_diagnosis and dim_procedure
+- Loaded from diagnoses and procedures.
+- These allow user-friendly codes (ICD10, CPT) to be used in queries while bridges store surrogate keys.
+
+
+5) Loading fact_encounters (grain: one row per encounter)
+This is the main part of the ETL.
+
+5.1 Pre-aggregations computed first
+We build small helper aggregates from OLTP:
+
+- diag_counts:
+  COUNT(*) of encounter_diagnoses per encounter_id
+
+- proc_counts:
+  COUNT(*) of encounter_procedures per encounter_id
+
+- bill_aggs:
+  claim_count, SUM(claim_amount), SUM(allowed_amount) per encounter_id
+
+This avoids doing expensive joins each time a reporting query runs.
+
+5.2 Fact insert
+For each OLTP encounter, we insert one row into dw.fact_encounters and perform key lookups:
+
+- patient_key: from dw.dim_patient via patient_id
+- provider_key: from dw.dim_provider via provider_id
+- specialty_key: from dw.dim_specialty via provider.specialty_id
+- department_key: from dw.dim_department via encounters.department_id
+- encounter_type_key: from dw.dim_encounter_type via encounters.encounter_type
+- encounter_date_key: from dw.dim_date via encounter_date::date
+- discharge_date_key: from dw.dim_date via discharge_date::date (nullable)
+
+We also populate metrics:
+- diagnosis_count, procedure_count from pre-aggregations
+- claim_count, total_claim_amount, total_allowed_amount from billing aggregates (default to 0 when missing)
+- length_of_stay_days = discharge_date::date - encounter_date::date (nullable if no discharge)
+- is_inpatient_flag = true when encounter_type = 'Inpatient'
+
+Handling missing data:
+- If an encounter has no billing, totals default to 0.
+- If discharge_date is missing, length_of_stay_days is NULL and discharge_date_key is NULL.
+
+
+6) Loading bridge tables (many-to-many)
+Bridges are loaded after the fact so we can use encounter_key.
+
+6.1 bridge_encounter_diagnoses
+Source: OLTP encounter_diagnoses
+Logic:
+- Join encounter_diagnoses.encounter_id to dw.fact_encounters.encounter_id to get encounter_key.
+- Join encounter_diagnoses.diagnosis_id to dw.dim_diagnosis.diagnosis_id to get diagnosis_key.
+- Store diagnosis_sequence.
+
+6.2 bridge_encounter_procedures
+Source: OLTP encounter_procedures
+Logic:
+- Join encounter_procedures.encounter_id to dw.fact_encounters.encounter_id to get encounter_key.
+- Join encounter_procedures.procedure_id to dw.dim_procedure.procedure_id to get procedure_key.
+- procedure_date_key is looked up in dw.dim_date using procedure_date.
+
+Why bridges:
+- Diagnoses and procedures are many-to-many with encounters.
+- Keeping them in bridges avoids duplicating encounter facts and keeps Q1/Q3/Q4 clean and accurate.
+
+
+7) Refresh Strategy (for production vs lab)
+Lab approach:
+- Full reload every run (truncate + reload).
+- This is easiest to debug and is fine for demonstrating performance differences.
+
+Production approach (what we would do in real life):
+- Daily incremental loads based on encounter_date / claim_date.
+- Dimensions updated using an SCD approach (Type 1 for simple overwrite, Type 2 if history is required).
+- Late arriving facts handled by:
+  - loading encounters first
+  - updating revenue totals later when billing arrives (upsert on encounter_id)
+  - keeping an “unknown” dimension row for missing keys if needed
+
+
+8) Post-load optimization
+At the end of the script we run ANALYZE on all DW tables.
+This updates planner statistics so EXPLAIN ANALYZE reflects realistic plans and join choices.
